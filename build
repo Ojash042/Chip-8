@@ -1,0 +1,19 @@
+#!/bin/env bash
+
+PROJECT=Chip-8
+
+flags=(
+  -Wall
+  # -Wextra
+)
+
+src_files=(
+  ./log.c
+  ./main.c
+)
+
+libs=(
+  -lraylib
+)
+
+gcc ${flags[@]} ${src_files[@]} -lraylib -o ./out/${PROJECT}

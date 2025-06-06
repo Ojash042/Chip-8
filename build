@@ -4,11 +4,11 @@ PROJECT=Chip-8
 
 flags=(
   -Wall
-  # -Wextra
+  -Wextra
 )
 
 src_files=(
-  ./log.c
+  ./lib/log.c
   ./main.c
 )
 
@@ -16,4 +16,4 @@ libs=(
   -lraylib
 )
 
-gcc ${flags[@]} ${src_files[@]} -lraylib -o ./out/${PROJECT}
+gcc "${flags[@]}" "${src_files[@]}" "${libs[@]}" -o ./out/${PROJECT}

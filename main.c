@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <stdckdint.h>
+#include <time.h>
+#include <sys/time.h>
 
 #define MEMORY_SIZE 0x1000
 #define STACK_SIZE 16
@@ -41,7 +44,7 @@ typedef struct
   GeneralRegister *generalRegister;
   u_int16_t program_counter;
   u_int16_t index_register;
-  u_int16_t stack_register;
+  u_int16_t stack_pointer;
   u_int16_t stack[STACK_SIZE];
   u_int8_t delay_timer;
   u_int8_t sound_timer;
@@ -108,6 +111,8 @@ void parse_instruction(u_int8_t code)
 void setup_chip()
 {
   chip->generalRegister = (GeneralRegister *)malloc(sizeof(GeneralRegister));
+  chip->stack_pointer = 0;
+
   for (int i = 0; i <= 0xF; i++)
   {
     *((u_int8_t *)chip->generalRegister + (i)) = 0;
@@ -157,13 +162,49 @@ int main(int argv, char **argc)
 
       if (code == 0x00e0)
       {
+        memset(chip->display, 0, sizeof(chip->display));
         ClearBackground(BLACK);
+      }
+
+      else if (code == 0x00EE) {
+        chip->program_counter = chip->stack[chip->stack_pointer];
+        chip->stack[chip->stack_pointer] = 0;
+        chip->stack_pointer--;
       }
 
       else if ((code >> 12) == 0x1)
       {
         logevent(Info, 64, "Program Counter Jumped to: 0x%04x", (code & 0x0FFF));
         chip->program_counter = (code & 0xFFF);
+      }
+
+      else if (code >> 12 == 0x2) {
+        chip->stack[chip->stack_pointer] = chip->program_counter;
+        chip->stack_pointer++;
+        chip->program_counter = code & 0x0FFF;
+        chip->program_counter-=2;
+      }
+
+      else if (code >> 12 == 0x3) {
+        const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
+        if (vx == code & 0x00FF) {
+          chip->program_counter +=2;
+        }
+      }
+
+      else if (code >> 12 == 0x4) {
+        const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
+        if (vx != code & 0x00FF) {
+          chip->program_counter +=2;
+        }
+      }
+
+      else if (code >> 12 == 0x5) {
+        const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
+        const u_int8_t vy = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
+        if (vx == vy) {
+          chip->program_counter +=2;
+        }
       }
 
       else if ((code >> 12) == 0x6)
@@ -176,14 +217,85 @@ int main(int argv, char **argc)
         *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) +=
             (u_int8_t)(code & 0x00FF);
       }
+      else if (code >> 12 == 0x8 ) {
+        if ((code & 0x000F) == 0x0)
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)) ;
+        else if ((code & 0x000F) == 0x1)
+          *((u_int8_t *) chip->generalRegister + ((code >> 8) & 0x0F)) |= *(
+            (u_int8_t *) chip->generalRegister + ((code >> 4) & 0x00F));
+        else if ((code & 0x000F) == 0x2)
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) &= *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)) ;
+        else if ((code & 0x000F) == 0x3)
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) ^= *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)) ;
+        else if ((code & 0x000F) == 0x4) {
+          const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
+          const u_int8_t vy = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
+          u_int8_t result;
+          chip->generalRegister->VF = (u_int8_t) ckd_add(&result, vx, vy);
 
-      else if ((code >> 12) == 0xA)
-      {
-        chip->index_register = code & 0x0FFF;
+          // Sets Vx to result
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = result;
+        }
+        else if ((code & 0x000F) == 0x5) {
+          const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
+          const u_int8_t vy = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
+          u_int8_t result;
+          chip->generalRegister->VF = vx > vy;
+          // Sets Vx to result
+          ckd_sub(&result, vx, vy);
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = result;
+        }
+        else if ((code & 0x000F) == 0x6) {
+          // Ambiguous Instruction
+          // *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F))  = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)); // Vx = Vy
+          chip-> generalRegister->VF =  *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) & 1;
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) >>=1;
+        }
+        else if ((code & 0x000F) == 0x7) {
+          const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
+          const u_int8_t vy = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
+          u_int8_t result;
+          chip->generalRegister->VF = (u_int8_t) (vy > vx);
+          ckd_sub(&result, vy, vx);
+
+          // Sets Vx to result
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = result;
+        }
+        else if ((code & 0x000F) == 0xE) {
+          // Ambiguous Instruction
+          //*((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F))  = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)); // Vx = Vy
+          chip-> generalRegister->VF =  *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) >> 7;
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) <<=1;
+        }
       }
 
-      else if ((code >> 12) == 0xD)
-      {
+      else if (code >> 12 == 0x9) {
+        const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
+        const u_int8_t vy = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
+        if (vx != vy) {
+          chip->program_counter +=2;
+        }
+      }
+
+      else if ((code >> 12) == 0xA)
+        chip->index_register = code & 0x0FFF;
+      else if ((code >> 12) == 0xB) {
+        // Ambiguous
+        // chip->program_counter =  chip->generalRegister->V0 + code & 0x0FFF;
+        chip->program_counter =  (code & 0x0FFF) + *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));;
+        chip->program_counter -=2;
+      }
+      else if ((code >> 12) == 0xC) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        const unsigned long seed = ts.tv_nsec * 1000 + ts.tv_sec / 1000000;
+        srand(seed);
+        u_int8_t random = random() % (code & 0x00FF) && code && 0x00FF;
+        *((u_int8_t *)chip->generalRegister + (code >> 8 & 0x0F)) = random;
+      }
+
+
+      else if ((code >> 12) == 0xD){
         // DXYN
         const u_int8_t x =
             *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x00F)) % DISPLAY_WIDTH;
@@ -205,7 +317,9 @@ int main(int argv, char **argc)
             }
           }
         }
+
       }
+
       for (int y= 0; y < DISPLAY_HEIGHT; y++)
       {
         for (int x = 0; x < DISPLAY_WIDTH; x++)

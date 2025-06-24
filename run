@@ -3,18 +3,20 @@
 PROJECT=Chip-8
 args=$1 
 
-./build
+./make
 
 
 if [ -n "$1" ];then
-  if [ args != "--cosmac" ] ;then
+  if [ "$args" != "--cosmac" ] ;then
     echo -e "Usage: Chip-8 [arguments]\n"
-    echo -e "\t --cosmac\toriginal COSMAC VIP implementation"
-    echo -e "\t --chip-8\tModern CHIP-8 implementation (default)"
+    echo -e "\t --cosmac\t original COSMAC VIP implementation"
+    echo -e "\t --chip-8\t Modern CHIP-8 implementation (default)"
     exit 0
   fi
 fi
 
-if [ $? -eq 0 ]; then
+exitcode=$?
+
+if [ "$exitcode" -eq 0 ]; then
   ./out/${PROJECT} "$1"
 fi

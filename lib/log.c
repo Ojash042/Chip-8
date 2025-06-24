@@ -29,7 +29,7 @@ int setup_logs(LogSettings *log_settings) {
   char *logfile_location = (char *)malloc(FILE_LOCATION_LENGTH * sizeof(char));
 
   char formatted_time[64];
-  char *datetime_format = malloc(sizeof(char) * 8);
+  const char *datetime_format = malloc(sizeof(char) * 8);
 
   if (log_settings->interval == Never) {
     snprintf(logfile_location, FILE_LOCATION_LENGTH, "./logs/chip-8%s.log", "");
@@ -44,7 +44,7 @@ int setup_logs(LogSettings *log_settings) {
 
     strftime(formatted_time, sizeof(formatted_time), datetime_format,
              local_time);
-    snprintf(logfile_location, FILE_LOCATION_LENGTH, "./logs/chip-8_%s.log",
+    snprintf(logfile_location, FILE_LOCATION_LENGTH, "../logs/chip-8_%s.log",
              formatted_time);
   }
 

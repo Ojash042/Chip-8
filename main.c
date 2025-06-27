@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <stdckdint.h>
 #include <time.h>
+#include <sys/ucontext.h>
 
 #define MEMORY_SIZE 0x1000
 #define STACK_SIZE 16
@@ -65,6 +66,7 @@ typedef struct {
 static Chip *chip = nullptr;
 static ChipArch chipArch = CHIP;
 static ChipCharMap chipCharMaps[16];
+static bool shouldIncrement = true;
 
 void copy_font_to_memory(Chip *chip)
 {
@@ -93,7 +95,7 @@ void copy_font_to_memory(Chip *chip)
 
 size_t load_rom()
 {
-  FILE *rom = fopen("../roms/ibm-logo.ch8", "rb");
+  FILE *rom = fopen("../roms/corax.ch8", "rb");
   if (rom == NULL)
   {
     logevent(Fatal, 64, "Error while reading Rom %s", "");
@@ -134,6 +136,7 @@ void setup_char_codes(){
     chipCharMaps[i].raylibCharCode = qwertyKeys[i];
   }
 };
+
 bool checkInputHeldMatchesVx(const u_int8_t vxRegisterValue) {
   for (int i = 0; i < KEYBOARD_SIZE; i++) {
     if (IsKeyDown(chipCharMaps[i].raylibCharCode)) {
@@ -169,6 +172,195 @@ void setup_chip()
   setup_char_codes();
 }
 
+void display_to_screen() {
+  for (int y= 0; y < DISPLAY_HEIGHT; y++){
+    for (int x = 0; x < DISPLAY_WIDTH; x++){
+      if (chip->display[y][x])
+        DrawRectangle(x * DISPLAY_SCALE, y * DISPLAY_SCALE, DISPLAY_SCALE,
+          DISPLAY_SCALE, RAYWHITE);
+    }
+  }
+}
+
+void parseInstructions(const u_int16_t code) {
+  const u_int8_t opcode = (code >> 12) & 0xF;
+
+  const u_int8_t Vx = *((u_int8_t *) chip->generalRegister + ((code >> 8) & 0x0F));
+  const u_int8_t Vy = *((u_int8_t *) chip->generalRegister + ((code >> 4) & 0x00F));
+  const u_int16_t nnn = code & 0x0FFF;
+  const u_int8_t nn = code & 0x00FF;
+  const u_int8_t n = code & 0x000F;
+
+  switch (opcode) {
+    case 0x0:
+      // OOE0 => Clear Screen
+      if (nnn == 0x0E0) {
+        memset(chip->display, 0, sizeof(chip->display));
+        ClearBackground(BLACK);
+        break;
+      }
+
+      if (nnn == 0x0EE) {
+        chip->stackPointer--;
+        chip->programCounter = chip->stack[chip->stackPointer];
+        chip->stack[chip->stackPointer] = 0;
+        shouldIncrement = false;
+        break;
+      }
+      break;
+
+    case 0x1:
+      chip->programCounter = nnn;
+      shouldIncrement = false;
+      break;
+
+      //2NNN => Call Subroutine
+    case 0x2:
+      chip->stack[chip->stackPointer] = chip->programCounter + 2;
+      chip->stackPointer++;
+      chip->programCounter = nnn;
+      shouldIncrement = false;
+      break;
+
+    case 0x3:
+      chip->programCounter += ((int) Vx == (nn) ) * 2;
+      break;
+
+    case 0x4:
+      chip->programCounter += ((int) Vx != (nn)) * 2;
+      break;
+
+    case 0x5:
+      chip->programCounter += ((int) Vx == Vy ) * 2;
+      break;
+
+    case 0x6:
+      *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = nn;
+      break;
+
+    case 0x7:
+      *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) += nn;
+      break;
+
+    case 0x8:
+      // 8XY0 => Set Vx = Vy
+      if ((code & 0x000F) == 0x0)
+        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) =
+          *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
+
+      // 8XY1 => Set Vx |= Vy
+      else if ((code & 0x000F) == 0x1)
+        *((u_int8_t *) chip->generalRegister + ((code >> 8) & 0x0F)) |=
+          *((u_int8_t *) chip->generalRegister + ((code >> 4) & 0x00F));
+
+      // 8XY2 => Set Vx &= Vy
+      else if ((code & 0x000F) == 0x2)
+        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) &=
+          *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
+
+      // 8XY3 => Set Vx ^= Vy
+      else if ((code & 0x000F) == 0x3)
+        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) ^=
+          *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)) ;
+
+      // 8XY4 => Set Vx+=Vy (with carry flag VF Set)
+      else if ((code & 0x000F) == 0x4) {
+        const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
+        const u_int8_t vy = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
+        u_int8_t result;
+        const bool overflow = (u_int8_t) ckd_add(&result, vx, vy);
+
+        if (overflow)
+          chip->generalRegister->VF = 1;
+
+        // Sets Vx to result
+        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = result;
+      }
+
+      // 8XY5 => Set Vx = Vx - Vy (with carry flag VF set on underflow)
+      else if ((code & 0x000F) == 0x5) {
+        const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
+        const u_int8_t vy = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
+        u_int8_t result;
+
+        if (vx > vy)
+          chip->generalRegister->VF = 1;
+
+        // Sets Vx to result
+        ckd_sub(&result, vx, vy);
+        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = result;
+      }
+
+      // 8XY6 => Shift Vx 1 bit to right
+      else if ((code & 0x000F) == 0x6) {
+        // Ambiguous Instruction
+        if (chipArch != COSMAC)
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F))  =
+            *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)); // Vx = Vy
+
+        chip-> generalRegister->VF =  *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) & 1;
+        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) >>= 1;
+      }
+
+      //8XY6 => Set Vx = Vy - Vx ( with carry flag VF set on underflow ).
+      else if ((code & 0x000F) == 0x7) {
+        u_int8_t result;
+        if (Vx > Vy)
+          chip->generalRegister->VF = 1  ;
+        ckd_sub(&result, Vy, Vx);
+        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = result;
+      }
+
+      // 8XYE => Shift Vx 1 bit to right
+      else if ((code & 0x000F) == 0xE) {
+        // Ambiguous Instruction
+        if (chipArch != COSMAC)
+          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F))  =
+            *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)); // Vx = Vy
+
+        chip-> generalRegister->VF =  *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) >> 7;
+        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) <<= 1;
+      }
+      break;
+
+    // 9XY0 =>  Skip instruction if Vx != Vy
+    case 0x9:
+      chip->programCounter += (Vx != Vy) * 2 ;
+      break;
+
+    // ANNN => Set Index Register to NNN
+    case 0xA:
+      chip->indexRegister = code & 0x0FFF;
+      break;
+
+    case 0xD:
+      const u_int8_t x =
+        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x00F)) % DISPLAY_WIDTH;
+      const u_int8_t y =
+        *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x0F)) % DISPLAY_HEIGHT;
+
+      for (int row = 0; row < n; row++) {
+        const u_int8_t sprite_byte = chip->memory[chip->indexRegister + row];
+        const int py =  (y + row) % DISPLAY_HEIGHT;
+        for (int bitPosition = 0; bitPosition < 8; bitPosition++) {
+          const int px =  (x + bitPosition) % DISPLAY_WIDTH;
+          const bool sprite_pixel = (sprite_byte & (0x80 >> bitPosition)) !=0;
+
+          if (sprite_pixel) {
+            if (chip->display[py][px]) {
+              chip->generalRegister->VF = 1;
+            }
+            chip->display[py][px] ^= 1;
+          }
+        }
+      }
+      break;
+
+    default:
+      break;
+  }
+}
+
 int main(const int argv, char **argc)
 {
   if (argv == 2 && strcmp(argc[1], "--cosmac") == 0) {
@@ -188,6 +380,7 @@ int main(const int argv, char **argc)
   chip = (Chip *)(malloc(sizeof(Chip)));
   if (chip == nullptr)
     exit(-1);
+
   setup_chip();
   const u_int16_t rom_size = load_rom();
 
@@ -196,301 +389,38 @@ int main(const int argv, char **argc)
   InitWindow(DISPLAY_WIDTH * DISPLAY_SCALE , DISPLAY_HEIGHT * DISPLAY_SCALE,
              "CHIP-8");
 
+  chip->programCounter = (u_int16_t) ROM_BASE_ADDRESS;
+
   while (!WindowShouldClose())
   {
     BeginDrawing();
-    ClearBackground(BLACK);
+    constexpr u_int8_t INSTRUCTIONS_PER_FRAME = 11;
 
-    chip->programCounter = (u_int16_t)0x200;
+    for (int i=0; i<INSTRUCTIONS_PER_FRAME; i++) {
 
-    while (chip->programCounter <
-           (u_int16_t)(rom_size + ROM_BASE_ADDRESS) - 1)
-    {
+      const bool shouldProgramContinue = chip->programCounter >= ROM_BASE_ADDRESS &&
+        chip->programCounter < (u_int16_t)(rom_size + ROM_BASE_ADDRESS) - 1;
 
-      const u_int16_t code = (chip->memory[chip->programCounter] << 8) +
-                       chip->memory[chip->programCounter + 1];
+      if (shouldProgramContinue){
 
-      if (code >> 12 == 3) {
-        logevent(Info, 64, "Stopping at 0x%02X", (code >> 12));
-      }
-      const u_int8_t Vx = *((u_int8_t *) chip->generalRegister + ((code >> 8) & 0x0F));
-      const u_int8_t Vy = *((u_int8_t *) chip->generalRegister + ((code >> 4) & 0x00F));
-      // OOE0 => Clear Screen
-      if (code == 0x00e0)
-      {
-        memset(chip->display, 0, sizeof(chip->display));
-        ClearBackground(BLACK);
-      }
+        const u_int16_t code = (chip->memory[chip->programCounter] << 8) +
+          chip->memory[chip->programCounter + 1];
 
-      // 00EE => return from subroutine
-      else if (code == 0x00EE) {
-        chip->programCounter = chip->stack[chip->stackPointer];
-        chip->stack[chip->stackPointer] = 0;
-        chip->stackPointer--;
-      }
+        shouldIncrement = true;
 
-      // 1NNN = Jump to NNN
-      else if ((code >> 12) == 0x1)
-      {
-        chip->programCounter = (code & 0x0FFF);
-      }
+        logevent(Info, 64, "PC-> 0x%04X \tCode: 0x%04X", chip->programCounter, code);
 
-      // 2NNN => Call Subroutine
-      else if (code >> 12 == 0x2) {
-        chip->stack[chip->stackPointer] = chip->programCounter;
-        chip->stackPointer++;
-        chip->programCounter = code & 0x0FFF;
-        chip->programCounter-=2;
-      }
+        parseInstructions(code);
 
-      /// 3XNN => Skip instruction if value in Vx == NN
-      else if (code >> 12 == 0x3) {
-        if (Vx == (code & 0x00FF)) {
-          chip->programCounter +=2;
-        }
-      }
-
-      // 4XNN => Skip instruction if value in Vx != NN
-      else if (code >> 12 == 0x4) {
-        if (Vx != (code & 0x00FF)) {
-          chip->programCounter +=2;
-        }
-      }
-
-      // 5XY0 => Skip instruction if Vx == Vy
-      else if (code >> 12 == 0x5) {
-        if (Vx == Vy) {
-          chip->programCounter +=2;
-        }
-      }
-
-      // 6XNN =>  Set Vx = NN
-      else if ((code >> 12) == 0x6)
-      {
-        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = code & 0x00FF;
-      }
-
-      // 7XNN => Set Vx += NN
-      else if ((code >> 12) == 0x7)
-      {
-        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) +=
-            (u_int8_t)(code & 0x00FF);
-      }
-
-      else if (code >> 12 == 0x8 ) {
-        // 8XY0 => Set Vx = Vy
-        if ((code & 0x000F) == 0x0)
-          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)) ;
-
-        // 8XY1 => Set Vx |= Vy
-        else if ((code & 0x000F) == 0x1)
-          *((u_int8_t *) chip->generalRegister + ((code >> 8) & 0x0F)) |= *(
-            (u_int8_t *) chip->generalRegister + ((code >> 4) & 0x00F));
-
-        // 8XY2 => Set Vx &= Vy
-        else if ((code & 0x000F) == 0x2)
-          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) &=
-            *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
-
-        // 8XY3 => Set Vx ^= Vy
-        else if ((code & 0x000F) == 0x3)
-          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) ^= *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)) ;
-
-        // 8XY4 => Set Vx+=Vy (with carry flag VF Set)
-        else if ((code & 0x000F) == 0x4) {
-          const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
-          const u_int8_t vy = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
-          u_int8_t result;
-          const bool overflow = (u_int8_t) ckd_add(&result, vx, vy);
-          if (overflow)
-            chip->generalRegister->VF = 1;
-
-          // Sets Vx to result
-          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = result;
-        }
-
-        // 8XY5 => Set Vx = Vx - Vy (with carry flag VF set on underflow)
-        else if ((code & 0x000F) == 0x5) {
-          const u_int8_t vx = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
-          const u_int8_t vy = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F));
-          u_int8_t result;
-          if (vx > vy)
-            chip->generalRegister->VF = 1;
-
-          // Sets Vx to result
-          ckd_sub(&result, vx, vy);
-          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = result;
-        }
-
-        // 8XY6 => Shift Vx 1 bit to right
-        else if ((code & 0x000F) == 0x6) {
-
-          // Ambiguous Instruction
-          if (chipArch != COSMAC) {
-            *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F))  = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)); // Vx = Vy
-          }
-
-          chip-> generalRegister->VF =  *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) & 1;
-          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) >>= 1;
-        }
-
-        //8XY6 => Set Vx = Vy - Vx ( with carry flag VF set on underflow ).
-        else if ((code & 0x000F) == 0x7) {
-          u_int8_t result;
-          if (Vx > Vy)
-            chip->generalRegister->VF = 1  ;
-
-          ckd_sub(&result, Vy, Vx);
-
-          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = result;
-        }
-
-        // 8XY6 => Shift Vx 1 bit to right
-        else if ((code & 0x000F) == 0xE) {
-          // Ambiguous Instruction
-          if (chipArch != COSMAC) {
-            *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F))  = *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x00F)); // Vx = Vy
-          }
-
-          chip-> generalRegister->VF =  *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) >> 7;
-          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) <<=1;
-
-        }
-      }
-
-      // 9XY0 =>  Skip instruction if Vx != Vy
-      else if (code >> 12 == 0x9) {
-        if (Vx != Vy) {
-          chip->programCounter +=2;
-        }
-      }
-
-      // ANNN => Set Index Register to NNN
-      else if ((code >> 12) == 0xA)
-        chip->indexRegister = code & 0x0FFF;
-
-      // Jump with offset
-      else if ((code >> 12) == 0xB) {
-        // Ambiguous Code
-        if (chipArch != COSMAC) {
-          chip->programCounter =  (code & 0x0FFF) + *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F));
-        }
-        else {
-          chip->programCounter =  chip->generalRegister->V0 + (code & 0x0FFF);
-        }
-        chip->programCounter -=2;
-      }
-
-      // CXNN => Random Number Generator
-      else if ((code >> 12) == 0xC) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        const unsigned long seed = ts.tv_nsec * 1000 + ts.tv_sec / 1000000;
-        srand(seed);
-        const u_int8_t rand = random() % (code & 0x00FF) && (code & 0x00FF);
-        *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = rand;
-      }
-
-      // DXYN => Draw
-      else if ((code >> 12) == 0xD){
-        const u_int8_t x =
-            *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x00F)) % DISPLAY_WIDTH;
-        const u_int8_t y =
-            *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x0F)) % DISPLAY_HEIGHT;
-        u_int8_t const n = code & 0x000F;
-
-        for (int row = 0; row < n; row++) {
-          const u_int8_t sprite_byte = chip->memory[chip->indexRegister + row];
-          const int py =  (y + row) % DISPLAY_HEIGHT;
-          for (int bitPosition = 0; bitPosition < 8; bitPosition++) {
-            const int px =  (x + bitPosition) % DISPLAY_WIDTH;
-            const bool sprite_pixel = (sprite_byte & (0x80 >> bitPosition)) !=0;
-            if (sprite_pixel) {
-              if (chip->display[py][px]) {
-                chip->generalRegister->VF = 1;
-              }
-              chip->display[py][px] ^= 1;
-            }
-          }
-        }
-      }
-
-      else if (code >> 12 == 0xE) {
-        // EX9E => Skip instruction if key held same as Vx
-        // EXA1 => Skip instruction if key held not same as Vx
-        if (
-          ((code & 0x00FF) == 0x9E && checkInputHeldMatchesVx(Vx)) ||
-          ((code & 0x00FF) == 0xA1 && !checkInputHeldMatchesVx(Vx))
-          ) {
+        if (shouldIncrement)
           chip->programCounter += 2;
-        }
       }
 
-      else if (code >> 12 == 0xF) {
-        // Set Vx = Delay timer
-        if ((code & 0x00FF) == 0x07) {
-          *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = chip->delayTimer;
-        }
-        // Set  Delay Timer to Vx
-        else if ((code & 0x00FF) == 0x15) {
-          chip->delayTimer = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) ;
-        }
-
-        // Set Sound Timer to Vx
-        else if ((code & 0x00FF) == 0x18) {
-          chip->soundTimer = *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) ;
-        }
-
-        else if ((code & 0x00FF) == 0x1E) {
-          u_int8_t result;
-          const bool overflow = ckd_add(&result, chip->indexRegister, Vx);
-          if (overflow || ((result >> 12) & 0xF > 0 ) )
-            chip->generalRegister->VF = 1;
-        }
-
-        else if ((code & 0x00FF) == 0x0A) {
-          int8_t result = get_pressed_char_code();
-          while (result  != -1) {
-            chip->programCounter -= 2;
-            result = get_pressed_char_code();
-          }
-          *((u_int8_t*) chip->generalRegister + ((code >> 8) & 0x0F)) = result;
-        }
-
-        else if ((code & 0x00FF) == 0x29)
-          chip->indexRegister = chip->memory[( FONT_BASE_MEMORY_ADDRESS ) + Vx];
-
-        else if ((code & 0x00FF) == 0x33) {
-          chip->memory[chip->indexRegister] = (u_int8_t) ( Vx / 100);
-          chip->memory[chip->indexRegister + 1] = (u_int8_t) (( Vx % 100 ) / 10);
-          chip->memory[chip->indexRegister + 2] = (u_int8_t) ( Vx % 10);
-        }
-
-        else if ((code & 0x00FF) == 0x55) {
-          if (chipArch == COSMAC) {
-            for (int i = 0; i < ((code >> 8) & 0x0F); i++ )
-              chip->memory[chip->indexRegister + i] =  *((u_int8_t *) chip->generalRegister + i);
-          }
-        }
-
-        else if ((code & 0x00FF) == 0x65) {
-          if (chipArch == COSMAC) {
-            for (int i = 0; i < ((code >> 8) & 0x0F); i++)
-              chip->memory[chip->indexRegister + i] =  *((u_int8_t *) chip->generalRegister + i);
-          }
-        }
+      else {
+        break;
       }
 
-      for (int y= 0; y < DISPLAY_HEIGHT; y++)
-      {
-        for (int x = 0; x < DISPLAY_WIDTH; x++)
-        {
-          if (chip->display[y][x])
-            DrawRectangle(x * DISPLAY_SCALE, y * DISPLAY_SCALE, DISPLAY_SCALE,
-                          DISPLAY_SCALE, RAYWHITE);
-        }
-      }
-      chip->programCounter += 2;
+      display_to_screen();
     }
     EndDrawing();
   }

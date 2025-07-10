@@ -14,7 +14,13 @@
 typedef enum {
     CHIP,
     COSMAC
-  } ChipArch;
+} ChipArch;
+
+typedef enum {
+    HALT,
+    CONTINUE,
+    SKIP
+} InstructionState;
 
 typedef struct
 {
@@ -57,11 +63,12 @@ typedef struct {
 
 void setChipArchitecture(const ChipArch arch);
 size_t loadRom();
-void setup_chip();
-void display_to_screen();
-bool parseInstructions(u_int16_t code);
+void setupChip();
+void displayToScreen();
+InstructionState parseInstructions(u_int16_t code);
 u_int16_t getProgramCounter();
-void incrementProgramCounter();
+void incrementProgramCounter(InstructionState state);
 u_int16_t getNextCode();
+void decrementCounters();
 
 #endif //CPU_H

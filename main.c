@@ -1,12 +1,9 @@
 // ReSharper disable CppDFANullDereference
 #include "./lib/log.h"
 #include <raylib.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
-#include <time.h>
-#include <sys/ucontext.h>
+#include "./lib/cpu.h"
 
 #define MEMORY_SIZE 0x1000
 #define STACK_SIZE 16
@@ -17,9 +14,6 @@
 #define KEYBOARD_SIZE 16
 #define FONT_BASE_MEMORY_ADDRESS 0x50
 #define ROM_BASE_ADDRESS 0x200
-
-#include "./lib/cpu.h"
-
 
 
 int main(const int argv, char **argc)
@@ -38,21 +32,19 @@ int main(const int argv, char **argc)
   setup_logs(&logSettings);
   logevent(Info, 64, "Starting Chip-8 Emulator...", "");
 
-
-
-  setup_chip();
+  setupChip();
   const u_int16_t rom_size = loadRom();
+  float elapsedTime = 0.0f;
 
   SetTraceLogLevel(LOG_NONE);
   SetTargetFPS(60);
   InitWindow(DISPLAY_WIDTH * DISPLAY_SCALE , DISPLAY_HEIGHT * DISPLAY_SCALE,
              "CHIP-8");
 
-
   while (!WindowShouldClose())
   {
     BeginDrawing();
-    constexpr u_int8_t INSTRUCTIONS_PER_FRAME = 11;
+    constexpr u_int8_t INSTRUCTIONS_PER_FRAME = 22;
 
     for (int i=0; i<INSTRUCTIONS_PER_FRAME; i++) {
 
@@ -66,17 +58,21 @@ int main(const int argv, char **argc)
 
         // logevent(Info, 64, "PC-> 0x%04X \tCode: 0x%04X", chip->programCounter, code);
 
-        const bool shouldIncrement =  parseInstructions(code);
+        const InstructionState incrementState =  parseInstructions(code);
 
-        if (shouldIncrement)
-          incrementProgramCounter();
+        incrementProgramCounter(incrementState);
       }
 
       else {
         break;
       }
 
-      display_to_screen();
+      elapsedTime = GetFrameTime();
+      if (elapsedTime >= 1) {
+        elapsedTime = 0.0f;
+        decrementCounters();
+      }
+      displayToScreen();
     }
     EndDrawing();
   }

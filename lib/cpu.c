@@ -25,7 +25,12 @@ void setChipArchitecture(const ChipArch arch) {
   chipArch = arch;
 }
 
-void copy_font_to_memory(Chip *chip) {
+size_t min(const size_t a, const size_t b) {
+  return a < b ? a : b;
+}
+
+
+void copyFontToMemory(Chip *chip) {
   const u_int8_t font[] = {
       0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
       0x20, 0x60, 0x20, 0x20, 0x70, // 1
@@ -50,7 +55,7 @@ void copy_font_to_memory(Chip *chip) {
 
 size_t loadRom()
 {
-  FILE *rom = fopen("../roms/flags.ch8", "rb");
+  FILE *rom = fopen("../roms/keypad.ch8", "rb");
   if (rom == NULL)
   {
     logevent(Fatal, 64, "Error while reading Rom %s", "");
@@ -71,7 +76,7 @@ size_t loadRom()
 }
 
 
-void setup_char_codes(){
+void setupCharCodes(){
   // ReSharper disable once CppTooWideScope
   const u_int8_t chipKeys[KEYBOARD_SIZE] = {
     0x01, 0x02, 0x03, 0x0C,
@@ -93,7 +98,7 @@ void setup_char_codes(){
   }
 };
 
-void setup_chip()
+void setupChip()
 {
   chip = (Chip *)(malloc(sizeof(Chip)));
 
@@ -111,12 +116,13 @@ void setup_chip()
   memset(chip->memory, 0, sizeof(chip->memory));
   memset(chip->display, 0, sizeof(chip->display));
 
-  copy_font_to_memory(chip);
-  setup_char_codes();
+  copyFontToMemory(chip);
+  setupCharCodes();
 
 }
 
-void display_to_screen() {
+void displayToScreen() {
+  ClearBackground(BLACK);
   for (int y= 0; y < DISPLAY_HEIGHT; y++){
     for (int x = 0; x < DISPLAY_WIDTH; x++){
       if (chip->display[y][x])
@@ -126,18 +132,19 @@ void display_to_screen() {
   }
 }
 
-bool checkInputHeldMatchesVx(const u_int8_t vxRegisterValue) {
-  for (int i = 0; i < KEYBOARD_SIZE; i++) {
-    if (IsKeyDown(chipCharMaps[i].raylibCharCode)) {
-      return chipCharMaps[i].chipCharCode == vxRegisterValue;
+int8_t getJustPressedKey() {
+  for (int i =0; i < KEYBOARD_SIZE; i++) {
+    if (IsKeyReleased(chipCharMaps[i].raylibCharCode)) {
+      return (int8_t) chipCharMaps[i].chipCharCode;
     }
   }
-  return false;
+  return -1;
 }
 
-int8_t get_pressed_char_code() {
+
+int8_t getHeldCharCode() {
   for (int i =0; i < KEYBOARD_SIZE; i++) {
-    if (IsKeyPressed(chipCharMaps[i].raylibCharCode)) {
+    if (IsKeyDown(chipCharMaps[i].raylibCharCode)) {
       return (int8_t) chipCharMaps[i].chipCharCode;
     }
   }
@@ -148,8 +155,8 @@ u_int16_t getProgramCounter() {
   return chip->programCounter;
 }
 
-void incrementProgramCounter() {
-  chip->programCounter+=2;
+void incrementProgramCounter(const InstructionState state) {
+  chip->programCounter+= (state * 2);
 }
 
 u_int16_t getNextCode() {
@@ -157,10 +164,13 @@ u_int16_t getNextCode() {
           chip->memory[chip->programCounter + 1];
 }
 
-bool parseInstructions(const u_int16_t code) {
+void decrementCounters() {
+  chip->delayTimer = (u_int8_t) min(0, chip->delayTimer-1);
+}
+
+InstructionState parseInstructions(const u_int16_t code) {
   const u_int8_t opcode = (code >> 12) & 0xF;
 
-  const u_int8_t testX = (code >> 8) & 0x0F;
   u_int8_t *p_Vx = (u_int8_t *) chip->generalRegister + ((code >> 8) & 0x0F);
   const u_int8_t *p_Vy = (u_int8_t *) chip->generalRegister + ((code >> 4) & 0x00F);
   const u_int8_t Vy = *p_Vy;
@@ -184,20 +194,20 @@ bool parseInstructions(const u_int16_t code) {
         chip->stackPointer--;
         chip->programCounter = chip->stack[chip->stackPointer];
         chip->stack[chip->stackPointer] = 0;
-        return false;
+        return HALT;
       }
       break;
 
     case 0x1:
       chip->programCounter = nnn;
-      return false;
+      return HALT;
 
       //2NNN => Call Subroutine
     case 0x2:
       chip->stack[chip->stackPointer] = chip->programCounter + 2;
       chip->stackPointer++;
       chip->programCounter = nnn;
-      return false;
+      return HALT;
 
     case 0x3:
       chip->programCounter += ((int) Vx == nn ) * 2;
@@ -297,6 +307,15 @@ bool parseInstructions(const u_int16_t code) {
       chip->indexRegister = code & 0x0FFF;
       break;
 
+    case 0xC:
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      const unsigned long seed = ts.tv_nsec * 1000 + ts.tv_sec / 1000000;
+      srand(seed);
+      const u_int8_t rand = random() & (code & 0x00FF);
+      *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = rand;
+      break;
+
     // Code's wrong but it works
     case 0xD:
       const u_int8_t x =
@@ -304,6 +323,7 @@ bool parseInstructions(const u_int16_t code) {
       const u_int8_t y =
         *((u_int8_t *)chip->generalRegister + ((code >> 4) & 0x0F)) % DISPLAY_HEIGHT;
 
+      chip->generalRegister->VF = 0;
       for (int row = 0; row < n; row++) {
         const u_int8_t sprite_byte = chip->memory[chip->indexRegister + row];
         const int py =  (y + row) % DISPLAY_HEIGHT;
@@ -321,42 +341,54 @@ bool parseInstructions(const u_int16_t code) {
       }
       break;
 
-    case 0xC:
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      const unsigned long seed = ts.tv_nsec * 1000 + ts.tv_sec / 1000000;
-      srand(seed);
-      const u_int8_t rand = random() % (code & 0x00FF) && (code & 0x00FF);
-      *((u_int8_t *)chip->generalRegister + ((code >> 8) & 0x0F)) = rand;
+    case 0xE:
+      // 0xEX9E => Checks if get held Char Code matches Vx
+      if (nn == 0x9E)
+        return getHeldCharCode() == Vx ? SKIP : CONTINUE;
+
+      // 0xEXA1 => Checks if get held Char Code does not match Vx
+      if (nn == 0xA1)
+        return getHeldCharCode() == Vx ? CONTINUE : SKIP;
       break;
 
     case 0xF:
+      // 0xFX07 => Set Vx  =  Delay Timer
       if (nn == 0x07)
         *p_Vx = chip->delayTimer;
 
-      if (nn == 0x015)
+      // 0xFX15 => Set Delay Timer = Vx
+      else if (nn == 0x015)
         chip->delayTimer = Vx;
 
-      if (nn == 0x18)
+      // 0xFX18 => Set Sound Timer = Vx
+      else if (nn == 0x18)
         chip->soundTimer = Vx;
 
-      if (nn == 0x1E) {
+      // 0xFX1E => Increment Index Register with Vx
+      else if (nn == 0x1E) {
         chip->indexRegister += Vx;
         chip->generalRegister->VF = 0;
         if (chip->indexRegister >= 0x1000)
           chip->generalRegister->VF = 1;
       }
 
-      if (nn == 0x0A) {
-        const int8_t charCode = get_pressed_char_code();
+      // 0xFX0A => Get Key
+      else if (nn == 0x0A) {
+        const int8_t charCode = getJustPressedKey();
         if (charCode != -1) {
           *p_Vx = charCode;
         }
         else {
-          return false;
+          return HALT;
         }
       }
-      if (nn == 0x33) {
+
+      else if (nn == 0x29) {
+        chip->indexRegister = FONT_BASE_MEMORY_ADDRESS + (Vx & 0x0F)  * 5;
+      }
+
+      // 0xF33 => Binary Coded Decimal
+      else if (nn == 0x33) {
         const u_int8_t binaryValue = Vx;
         const u_int16_t memoryLocation = chip->indexRegister;
         chip->memory[memoryLocation] = (u_int8_t) (binaryValue / 100 );
@@ -364,7 +396,8 @@ bool parseInstructions(const u_int16_t code) {
         chip->memory[memoryLocation + 2] = (u_int8_t) (binaryValue % 10 );
       }
 
-      if (nn == 0x55) {
+      // 0xFX55 => Save to Memory
+      else if (nn == 0x55) {
         const u_int16_t memoryStartLocation = chip->indexRegister;
         const u_int8_t maxRegister = (code >> 8) & 0x0F;
         for (u_int8_t genRegister = 0; genRegister <= maxRegister ; genRegister++ ) {
@@ -375,7 +408,9 @@ bool parseInstructions(const u_int16_t code) {
           }
         }
       }
-      if (nn == 0x65) {
+
+      // 0xFX65 => Load from Memory
+      else if (nn == 0x65) {
         const u_int16_t memoryStartLocation = chip->indexRegister;
         const u_int8_t maxRegister = (code >> 8) & 0x0F;
         for (u_int8_t genRegister = 0; genRegister <= maxRegister ; genRegister++ ) {
@@ -386,11 +421,10 @@ bool parseInstructions(const u_int16_t code) {
           }
         }
       }
-
       break;
 
     default:
       break;
   }
-  return true;
+  return CONTINUE;
 }
